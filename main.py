@@ -31,6 +31,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "-1004435011216"))
 
 GROQ_API_KEY_THET_HTAR = os.getenv("GROQ_API_KEY_THET_HTAR")
 GROQ_API_KEY_PHOE_MAUNG = os.getenv("GROQ_API_KEY_PHOE_MAUNG")
+GROQ_API_KEY_PYT = os.getenv("GROQ_API_KEY_PYT") # New API Key for ပြည်သူ့ရင်ဖွင့်သံ
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -40,6 +41,9 @@ if not GROQ_API_KEY_THET_HTAR:
 
 if not GROQ_API_KEY_PHOE_MAUNG:
     raise ValueError("GROQ_API_KEY_PHOE_MAUNG is missing")
+
+if not GROQ_API_KEY_PYT:
+    raise ValueError("GROQ_API_KEY_PYT is missing")
 
 # -------------------- WARNING FILTER --------------------
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -82,6 +86,24 @@ CHANNEL_CONFIGS = {
             "- Tone: Formal, objective, and authoritative.\n"
             "- Headline: Bold the headline using <b> tags.\n"
             "- Bullet Points: Use ✅, 🔰, ☑️, 💚 bullet points for the key facts. Use one type of bullet point for one post. THIS IS MANDATORY.\n"
+            "- Structure: Clear, concise, and logical flow.\n"
+            "- Content: Ensure 100% accuracy for names, numbers, and dates.\n"
+            "- NO links, NO source signatures, NO promotional text."
+        )
+    },
+    -1004313131336: { # New Channel: ပြည်သူ့ရင်ဖွင့်သံ
+        "name": "ပြည်သူ့ရင်ဖွင့်သံ",
+        "signature": "<b>ပြည်သူ့ရင်ဖွင့်သံ</b>",
+        "api_key": GROQ_API_KEY_PYT,
+        "prompt": (
+            "You are 'ပြည်သူ့ရင်ဖွင့်သံ', a neutral and objective Burmese news reporter. "
+            "YOUR TASK: REWRITE the news content into a factual and unbiased report. "
+            "DO NOT copy the original text. Focus on presenting information clearly and neutrally.\n\n"
+            "STYLE REQUIREMENTS:\n"
+            "- Language: Burmese (မြန်မာဘာသာ).\n"
+            "- Tone: Neutral, objective, and factual.\n"
+            "- Headline: Bold the headline using <b> tags.\n"
+            "- Bullet Points: Use 🔸, 🔹, 🔺, 🔻 bullet points for key facts. Use one type of bullet point for one post. THIS IS MANDATORY.\n"
             "- Structure: Clear, concise, and logical flow.\n"
             "- Content: Ensure 100% accuracy for names, numbers, and dates.\n"
             "- NO links, NO source signatures, NO promotional text."
@@ -437,7 +459,6 @@ async def fetch_telegram_news(channel_username):
     for mirror in RSSHUB_MIRRORS:
         url = f"{mirror}/telegram/channel/{channel_username}"
         try:
-            logger.info(f"Fetching Telegram RSSHub feed: {url}")
             res = requests.get(url, headers=headers, timeout=15)
             if res.status_code != 200:
                 logger.warning(f"Mirror failed {url} with status {res.status_code}")
