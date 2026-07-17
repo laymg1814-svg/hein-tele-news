@@ -688,7 +688,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_store(f"is_posted_{safe_id}_{ch_id}", True)
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
         except Exception as e:
-            logger.warning(f"Failed to post to channel {ch_id}: {e}")
+            logger.error(f"Failed to post to channel {ch_id}: {e}")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🚨 **ERROR posting to {CHANNEL_CONFIGS[ch_id]['name']} (ID: {ch_id})**\n\n" \
+                     f"Error details: `{e}`\n\n" \
+                     f"Please check if the bot is an administrator in the channel and has the necessary permissions.",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
     elif action == "edit":
         ch_id = int(parts[2])
