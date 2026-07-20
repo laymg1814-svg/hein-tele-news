@@ -383,7 +383,7 @@ def ai_rewrite_text(original_text, prompt_style, api_key):
     try:
         client = Groq(api_key=api_key)
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": prompt_style},
                 {"role": "user", "content": f"Please rewrite this news content completely in Burmese:\n\n{original_text}"}
@@ -525,8 +525,10 @@ async def fetch_telegram_news(channel_username):
                 summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
                 # Create a robust unique ID using normalized GUID and content hash
-                content_hash = hashlib.md5((title + summary_text).encode()).hexdigest()[:12]
-                unique_id = f"tg_{channel_username}_{content_hash}"
+                # Combining title and summary text to ensure even if GUID changes slightly, same content is detected
+                content_to_hash = (title + summary_text).strip()
+                content_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
+                unique_id = f"tg_{channel_username}_{content_hash[:16]}"
                 
                 if is_post_processed(unique_id) or unique_id in seen_in_batch:
                     continue
@@ -601,8 +603,9 @@ async def fetch_rss_news(rss_url):
             summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
             # Create a robust unique ID using normalized GUID and content hash
-            content_hash = hashlib.md5((title + summary_text).encode()).hexdigest()[:12]
-            unique_id = f"rss_{content_hash}"
+            content_to_hash = (title + summary_text).strip()
+            content_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
+            unique_id = f"rss_{content_hash[:16]}"
             
             if is_post_processed(unique_id) or unique_id in seen_in_batch:
                 continue
