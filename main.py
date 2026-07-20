@@ -455,6 +455,9 @@ def get_post_buttons(safe_id):
 async def fetch_telegram_news(channel_username):
     extracted_items = []
     headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # Track IDs seen in this specific fetch batch to avoid duplicates within the same RSS feed
+    seen_in_batch = set()
 
     for mirror in RSSHUB_MIRRORS:
         url = f"{mirror}/telegram/channel/{channel_username}"
@@ -465,17 +468,28 @@ async def fetch_telegram_news(channel_username):
                 continue
 
             soup = make_soup(res.content)
-            if not soup.find_all("item"):
+            items = soup.find_all("item")
+            if not items:
                 soup = BeautifulSoup(res.content, "html.parser")
+                items = soup.find_all("item")
 
-            for item in soup.find_all("item")[:5]:
-                guid = item.find("guid") or item.find("link")
-                if not guid or not guid.text:
+            for item in items[:5]:
+                guid_tag = item.find("guid") or item.find("link")
+                if not guid_tag or not guid_tag.text:
                     continue
-
-                unique_id = f"tg_{channel_username}_{hashlib.md5(guid.text.encode()).hexdigest()[:12]}"
-                if is_post_processed(unique_id):
+                
+                # FIX: Normalize GUID to avoid duplicates from media groups (e.g. ?single=1)
+                # and protocol differences across mirrors.
+                raw_guid = guid_tag.text.strip()
+                normalized_guid = raw_guid.split('?')[0].rstrip('/')
+                
+                unique_id = f"tg_{channel_username}_{hashlib.md5(normalized_guid.encode()).hexdigest()[:12]}"
+                
+                # Skip if already processed in database OR already added in this batch
+                if is_post_processed(unique_id) or unique_id in seen_in_batch:
                     continue
+                
+                seen_in_batch.add(unique_id)
 
                 desc_html = ""
                 desc_tag = item.find("description")
@@ -496,10 +510,10 @@ async def fetch_telegram_news(channel_username):
                     "source": f"Telegram @{channel_username}",
                     "summary": text,
                     "image_url": img_src,
-                    "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else ""
+                    "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
                 })
 
-                logger.info(f"Fetched Telegram item | source=@{channel_username} | has_image={bool(img_src)}")
+                logger.info(f"Fetched Telegram item | source=@{channel_username} | id={unique_id} | has_image={bool(img_src)}")
 
             if extracted_items:
                 return extracted_items
@@ -527,18 +541,29 @@ async def fetch_rss_news(rss_url):
             return []
 
         soup = make_soup(response.content)
-        if not soup.find_all("item"):
+        items = soup.find_all("item")
+        if not items:
             soup = BeautifulSoup(response.content, "html.parser")
+            items = soup.find_all("item")
 
         extracted_items = []
-        for item in soup.find_all("item")[:5]:
-            guid = item.find("guid") or item.find("link")
-            if not guid or not guid.text:
+        seen_in_batch = set()
+        
+        for item in items[:5]:
+            guid_tag = item.find("guid") or item.find("link")
+            if not guid_tag or not guid_tag.text:
                 continue
+            
+            # Normalize RSS GUID/Link
+            raw_guid = guid_tag.text.strip()
+            normalized_guid = raw_guid.split('?')[0].rstrip('/')
 
-            unique_id = f"rss_{hashlib.md5(guid.text.encode()).hexdigest()[:12]}"
-            if is_post_processed(unique_id):
+            unique_id = f"rss_{hashlib.md5(normalized_guid.encode()).hexdigest()[:12]}"
+            
+            if is_post_processed(unique_id) or unique_id in seen_in_batch:
                 continue
+            
+            seen_in_batch.add(unique_id)
 
             title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
             desc = item.find("description").text if item.find("description") and item.find("description").text else ""
@@ -559,10 +584,10 @@ async def fetch_rss_news(rss_url):
                 "source": source_name,
                 "summary": text,
                 "image_url": img_src,
-                "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else ""
+                "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
             })
 
-            logger.info(f"Fetched RSS item | source={source_name} | has_image={bool(img_src)}")
+            logger.info(f"Fetched RSS item | source={source_name} | id={unique_id} | has_image={bool(img_src)}")
 
         return extracted_items
 
@@ -587,6 +612,7 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
 async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
     bot = context.bot
 
+    # Final check before processing to avoid race conditions
     if is_post_processed(item["id"]):
         return
 
@@ -597,14 +623,15 @@ async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
 
     safe_id = make_safe_key(item["id"])
 
+    # Mark as processed immediately to prevent duplication if next run starts before this one finishes
+    add_processed_post(item["id"])
+
     update_store(f"raw_{safe_id}", {
         "text": clean_summary,
         "link": item["link"],
         "image_url": item.get("image_url"),
         "source": item["source"]
     })
-
-    add_processed_post(item["id"])
 
     preview_text = rebuild_preview_text(safe_id) + "\n⌛ AI Processing..."
     buttons = get_post_buttons(safe_id)
