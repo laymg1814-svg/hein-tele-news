@@ -63,7 +63,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_THET_HTAR,
         "prompt": (
             "You are 'Thet Htar', a trendy female Burmese influencer. "
-            "YOUR TASK: COMPLETELY REWRITE the news text provided. DO NOT copy the original text.\n\n"
+            "YOUR TASK: COMPLETELY REWRITE the news text provided. If the text is very long, summarize it first, then rewrite. DO NOT copy the original text.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Friendly, conversational, and energetic.\n"
@@ -80,7 +80,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_PHOE_MAUNG,
         "prompt": (
             "You are 'Phoe Maung', a professional Burmese news editor. "
-            "YOUR TASK: PARAPHRASE and REWRITE the news into a professional report. DO NOT copy-paste.\n\n"
+            "YOUR TASK: PARAPHRASE and REWRITE the news into a professional report. If the text is very long, summarize it first, then rewrite. DO NOT copy-paste.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Formal, objective, and authoritative.\n"
@@ -97,7 +97,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_PYT,
         "prompt": (
             "You are 'ပြည်သူ့ရင်ဖွင့်သံ', a neutral and objective Burmese news reporter. "
-            "YOUR TASK: REWRITE the news content into a factual and unbiased report. "
+            "YOUR TASK: REWRITE the news content into a factual and unbiased report. If the text is very long, summarize it first, then rewrite. "
             "DO NOT copy the original text. Focus on presenting information clearly and neutrally.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
@@ -369,7 +369,7 @@ def download_media_as_bytes(url):
             else:
                 logger.warning(
                     f"Invalid image response from {candidate_url} | "
-                    f"status={res.status_code}, content-type={res.headers.get('Content-Type')}"
+                    f"status={res.status_code}, content-type={res.headers.get("Content-Type")}"
                 )
         except Exception as e:
             logger.warning(f"Image download failed from {candidate_url}: {e}")
@@ -418,6 +418,7 @@ def rebuild_preview_text(safe_id):
     source_info = raw_data.get("source", "Unknown")
     original_text = raw_data.get("text", "")
     img_url = raw_data.get("image_url")
+    original_title = raw_data.get("title", "")
 
     full_text = f"<b>မူရင်းသတင်း:</b>\n<b>Source:</b> {html.escape(source_info)}\n"
 
@@ -425,15 +426,27 @@ def rebuild_preview_text(safe_id):
         preview_link = get_tg_proxy_url(img_url) or img_url
         full_text += f"🖼 <b>Image:</b> <a href='{html.escape(preview_link)}'>[ View Photo ]</a>\n"
 
-    full_text += f"\n{html.escape(original_text[:1000])}\n\n"
+    # Handle long original text: only show title if available, otherwise a truncated summary
+    if len(original_text) > 500: # Threshold for long text
+        if original_title:
+            full_text += f"\n<b>{html.escape(original_title)}</b>\n"
+        else:
+            full_text += f"\n{html.escape(original_text[:200])}... (Full text too long, showing snippet)\n"
+    else:
+        full_text += f"\n{html.escape(original_text)}\n\n"
 
-    # Conditionally add AI rewritten versions
+    # Conditionally add AI rewritten versions and edited versions
     for ch_id, config in CHANNEL_CONFIGS.items():
-        v_text = get_channel_version_text(safe_id, ch_id)
-        if v_text:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (AI Rewritten):</b>\n{v_text}\n\n"
-        elif get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False):
+        current_text = get_channel_version_text(safe_id, ch_id)
+        is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
+
+        if is_edited:
+            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (Admin Edited):</b>\n{current_text}\n\n"
+        elif is_rewriting:
             full_text += f"====================\n\n📌 <b>{html.escape(config['name'])}:</b>\n⌛ AI Processing...\n\n"
+        elif current_text:
+            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (AI Rewritten):</b>\n{current_text}\n\n"
 
     return full_text
 
@@ -443,34 +456,31 @@ def get_post_buttons(safe_id):
         is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
         is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
         is_posted = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
-        has_ai_version = get_channel_version_text(safe_id, ch_id) is not None
+        has_ai_version = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) is not None
 
-        # Row 1: AI Rewrite Button
+        # Row 1: Admin Edit, AI Rewrite, Post
+        buttons_row = []
+
+        # Admin Edit Button
+        edit_label = "⚙️ Editing..." if get_from_store(f"is_editing_{safe_id}_{ch_id}", False) else ("✅ Edited" if is_edited else f"✍️ Edit ({config['name']})")
+        buttons_row.append(InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"))
+
+        # AI Rewrite Button
         if is_rewriting:
             ai_rewrite_label = "⚙️ AI Rewriting..."
+            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Disable during processing
         elif has_ai_version:
             ai_rewrite_label = "✅ AI Rewritten"
+            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Already rewritten, disable
         else:
             ai_rewrite_label = f"✨ AI Rewrite ({config['name']})"
-        
-        # Row 2: Edit and Post Buttons
-        edit_label = "⚙️ Editing..." if get_from_store(f"is_editing_{safe_id}_{ch_id}", False) else ("✅ Edited" if is_edited else f"✍️ Edit ({config['name']})")
+            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ai_rewrite|{safe_id}|{ch_id}"))
+
+        # Post Button
         post_label = "🟢 Posted" if is_posted else f"➡️ Post ({config['name']})"
+        buttons_row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
 
-        row = []
-        if not has_ai_version and not is_rewriting:
-            row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ai_rewrite|{safe_id}|{ch_id}"))
-        elif is_rewriting:
-            row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Disable button during processing
-        
-        if has_ai_version or is_edited:
-            row.append(InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"))
-            row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
-        elif not is_posted: # If no AI version or edit, allow posting original
-            row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
-
-        if row:
-            all_buttons.append(row)
+        all_buttons.append(buttons_row)
 
     all_buttons.append([InlineKeyboardButton("🔴 Discharge", callback_data=f"discharge|{safe_id}")])
     return all_buttons
@@ -480,7 +490,6 @@ async def fetch_telegram_news(channel_username):
     extracted_items = []
     headers = {"User-Agent": "Mozilla/5.0"}
     
-    # Track IDs seen in this specific fetch batch to avoid duplicates within the same RSS feed
     seen_in_batch = set()
 
     for mirror in RSSHUB_MIRRORS:
@@ -502,37 +511,38 @@ async def fetch_telegram_news(channel_username):
                 if not guid_tag or not guid_tag.text:
                     continue
                 
-                # FIX: Normalize GUID to avoid duplicates from media groups (e.g. ?single=1)
-                # and protocol differences across mirrors.
                 raw_guid = guid_tag.text.strip()
                 normalized_guid = raw_guid.split('?')[0].rstrip('/')
                 
-                unique_id = f"tg_{channel_username}_{hashlib.md5(normalized_guid.encode()).hexdigest()[:12]}"
+                # Extract title and summary for content-based hash
+                title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
+                desc_html = ""
+                desc_tag = item.find("description")
+                if desc_tag and desc_tag.text:
+                    desc_html = desc_tag.text
+                try:
+                    d_soup = BeautifulSoup(desc_html, "html.parser")
+                    summary_text = d_soup.get_text(separator="\n").strip()
+                except Exception:
+                    summary_text = desc_html.strip()
+                summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+                # Create a robust unique ID using normalized GUID and content hash
+                content_hash = hashlib.md5((title + summary_text).encode()).hexdigest()[:12]
+                unique_id = f"tg_{channel_username}_{content_hash}"
                 
-                # Skip if already processed in database OR already added in this batch
                 if is_post_processed(unique_id) or unique_id in seen_in_batch:
                     continue
                 
                 seen_in_batch.add(unique_id)
 
-                desc_html = ""
-                desc_tag = item.find("description")
-                if desc_tag and desc_tag.text:
-                    desc_html = desc_tag.text
-
-                try:
-                    d_soup = BeautifulSoup(desc_html, "html.parser")
-                    text = d_soup.get_text(separator="\n").strip()
-                except Exception:
-                    text = desc_html.strip()
-
-                text = re.sub(r"The post.*?appeared first on.*", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
                 img_src = extract_image_url_from_item(item, desc_html)
 
                 extracted_items.append({
                     "id": unique_id,
                     "source": f"Telegram @{channel_username}",
-                    "summary": text,
+                    "title": title,
+                    "summary": summary_text,
                     "image_url": img_src,
                     "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
                 })
@@ -578,16 +588,8 @@ async def fetch_rss_news(rss_url):
             if not guid_tag or not guid_tag.text:
                 continue
             
-            # Normalize RSS GUID/Link
             raw_guid = guid_tag.text.strip()
             normalized_guid = raw_guid.split('?')[0].rstrip('/')
-
-            unique_id = f"rss_{hashlib.md5(normalized_guid.encode()).hexdigest()[:12]}"
-            
-            if is_post_processed(unique_id) or unique_id in seen_in_batch:
-                continue
-            
-            seen_in_batch.add(unique_id)
 
             title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
             desc = item.find("description").text if item.find("description") and item.find("description").text else ""
@@ -598,15 +600,25 @@ async def fetch_rss_news(rss_url):
             except Exception:
                 body_text = desc.strip()
 
-            text = f"<b>{title}</b>\n\n{body_text}".strip()
-            text = re.sub(r"The post.*?appeared first on.*", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+            summary_text = f"<b>{title}</b>\n\n{body_text}".strip()
+            summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+            # Create a robust unique ID using normalized GUID and content hash
+            content_hash = hashlib.md5((title + summary_text).encode()).hexdigest()[:12]
+            unique_id = f"rss_{content_hash}"
+            
+            if is_post_processed(unique_id) or unique_id in seen_in_batch:
+                continue
+            
+            seen_in_batch.add(unique_id)
 
             img_src = extract_image_url_from_item(item, desc)
 
             extracted_items.append({
                 "id": unique_id,
                 "source": source_name,
-                "summary": text,
+                "title": title,
+                "summary": summary_text,
                 "image_url": img_src,
                 "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
             })
@@ -654,10 +666,11 @@ async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
         "text": clean_summary,
         "link": item["link"],
         "image_url": item.get("image_url"),
-        "source": item["source"]
+        "source": item["source"],
+        "title": item.get("title", "")
     })
 
-    # Initial preview text only shows source news
+    # Initial preview text only shows source news (title/summary and image)
     preview_text = rebuild_preview_text(safe_id)
     buttons = get_post_buttons(safe_id)
 
@@ -738,8 +751,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         original_text = raw.get("text", "")
         img_url = raw.get("image_url")
 
-        # Determine which text to post: edited, AI rewritten, or original
-        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") or get_channel_version_text(safe_id, ch_id) or original_text
+        # Determine which text to post based on priority: Admin Edited > AI Rewritten > Original
+        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") # Highest priority: Admin Edited
+        if not post_text:
+            post_text = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) # Second priority: AI Rewritten
+        if not post_text:
+            post_text = original_text # Lowest priority: Original
         
         if not post_text:
             return
@@ -781,11 +798,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_store(f"is_editing_{safe_id}_{ch_id}", True)
         review_msg_id = get_from_store(f"review_msg_{safe_id}")
 
+        # Get the current text being displayed for this channel to pre-fill for admin edit
+        current_text_for_edit = get_channel_version_text(safe_id, ch_id) or get_from_store(f"raw_{safe_id}").get("text", "")
+
         instruction_msg = await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=(
                 f"✍️ <b>{CHANNEL_CONFIGS[ch_id]['name']}</b> အတွက် စာသားပြင်ဆင်ပါ။\n"
-                f"ဒီ message ကို <b>Reply</b> ပြန်ပြီး edited text ပို့ပေးပါ။"
+                f"ဒီ message ကို <b>Reply</b> ပြန်ပြီး edited text ပို့ပေးပါ။\n\n"
+                f"<b>လက်ရှိစာသား:</b>\n{html.escape(current_text_for_edit[:500])}..."
             ),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=review_msg_id
