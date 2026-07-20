@@ -63,7 +63,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_THET_HTAR,
         "prompt": (
             "You are 'Thet Htar', a trendy female Burmese influencer. "
-            "YOUR TASK: COMPLETELY REWRITE the news text provided. If the text is very long, summarize it first, then rewrite. DO NOT copy the original text.\n\n"
+            "YOUR TASK: COMPLETELY REWRITE the news text provided. Summarize the content to ensure the final output is within 1000 characters. DO NOT copy the original text.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Friendly, conversational, and energetic.\n"
@@ -80,7 +80,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_PHOE_MAUNG,
         "prompt": (
             "You are 'Phoe Maung', a professional Burmese news editor. "
-            "YOUR TASK: PARAPHRASE and REWRITE the news into a professional report. If the text is very long, summarize it first, then rewrite. DO NOT copy-paste.\n\n"
+            "YOUR TASK: PARAPHRASE and REWRITE the news into a professional report. Summarize the content to ensure the final output is within 1000 characters. DO NOT copy-paste.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Formal, objective, and authoritative.\n"
@@ -97,7 +97,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_PYT,
         "prompt": (
             "You are 'ပြည်သူ့ရင်ဖွင့်သံ', a neutral and objective Burmese news reporter. "
-            "YOUR TASK: REWRITE the news content into a factual and unbiased report. If the text is very long, summarize it first, then rewrite. "
+            "YOUR TASK: REWRITE the news content into a factual and unbiased report. Summarize the content to ensure the final output is within 1000 characters. "
             "DO NOT copy the original text. Focus on presenting information clearly and neutrally.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
@@ -369,7 +369,7 @@ def download_media_as_bytes(url):
             else:
                 logger.warning(
                     f"Invalid image response from {candidate_url} | "
-                    f"status={res.status_code}, content-type={res.headers.get("Content-Type")}"
+                    f"status={res.status_code}, content-type={res.headers.get('Content-Type')}"
                 )
         except Exception as e:
             logger.warning(f"Image download failed from {candidate_url}: {e}")
@@ -426,14 +426,11 @@ def rebuild_preview_text(safe_id):
         preview_link = get_tg_proxy_url(img_url) or img_url
         full_text += f"🖼 <b>Image:</b> <a href='{html.escape(preview_link)}'>[ View Photo ]</a>\n"
 
-    # Handle long original text: only show title if available, otherwise a truncated summary
-    if len(original_text) > 500: # Threshold for long text
-        if original_title:
-            full_text += f"\n<b>{html.escape(original_title)}</b>\n"
-        else:
-            full_text += f"\n{html.escape(original_text[:200])}... (Full text too long, showing snippet)\n"
-    else:
-        full_text += f"\n{html.escape(original_text)}\n\n"
+    # Show full original text regardless of length as requested
+    if original_title:
+        full_text += f"\n<b>{html.escape(original_title)}</b>\n"
+    
+    full_text += f"\n{html.escape(original_text)}\n\n"
 
     # Conditionally add AI rewritten versions and edited versions
     for ch_id, config in CHANNEL_CONFIGS.items():
@@ -864,23 +861,33 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
             parse_mode=ParseMode.HTML
         )
-        await msg.reply_text(f"✅ {CHANNEL_CONFIGS[ch_id]['name']} အတွက် ပြင်ဆင်ပြီးပါပြီ။")
+        
+        # Optional: Delete the admin's reply message and the instruction message to keep chat clean
+        await context.bot.delete_message(ADMIN_ID, msg.message_id)
+        if edit_ctx:
+            await context.bot.delete_message(ADMIN_ID, reply_to_id)
+            delete_store(f"edit_context_{reply_to_id}")
+
     except Exception as e:
-        logger.warning(f"Failed updating edited preview: {e}")
+        logger.warning(f"Failed to update review message after admin edit: {e}")
 
-    delete_store(f"edit_context_{reply_to_id}")
-
-# -------------------- MAIN --------------------
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is missing!")
+        return
 
-    app.add_handler(CallbackQueryHandler(button_callback, pattern=r"^(post|edit|discharge|ai_rewrite|ignore)\|"))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_admin_reply))
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    app.job_queue.run_repeating(check_news, interval=300, first=5)
+    # Handlers
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.REPLY & filters.User(user_id=ADMIN_ID), handle_admin_reply))
 
-    logger.info("Bot is starting...")
-    app.run_polling()
+    # Periodic news check
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_news, interval=300, first=10) # Check every 5 minutes
+
+    logger.info("Bot started...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
