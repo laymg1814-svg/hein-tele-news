@@ -408,7 +408,7 @@ def get_channel_version_text(safe_id, ch_id):
     if edited:
         return edited
     versions = get_from_store(f"versions_{safe_id}", {})
-    return versions.get(str(ch_id), "⌛ AI Processing...")
+    return versions.get(str(ch_id), None) # Return None if not processed by AI yet
 
 def rebuild_preview_text(safe_id):
     raw_data = get_from_store(f"raw_{safe_id}")
@@ -427,26 +427,50 @@ def rebuild_preview_text(safe_id):
 
     full_text += f"\n{html.escape(original_text[:1000])}\n\n"
 
+    # Conditionally add AI rewritten versions
     for ch_id, config in CHANNEL_CONFIGS.items():
         v_text = get_channel_version_text(safe_id, ch_id)
-        full_text += f"====================\n\n📌 <b>{html.escape(config['name'])}:</b>\n{v_text}\n\n"
+        if v_text:
+            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (AI Rewritten):</b>\n{v_text}\n\n"
+        elif get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False):
+            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])}:</b>\n⌛ AI Processing...\n\n"
 
     return full_text
 
 def get_post_buttons(safe_id):
     all_buttons = []
     for ch_id, config in CHANNEL_CONFIGS.items():
-        is_editing = get_from_store(f"is_editing_{safe_id}_{ch_id}", False)
+        is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
         is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
         is_posted = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
+        has_ai_version = get_channel_version_text(safe_id, ch_id) is not None
 
-        edit_label = "⚙️ Editing..." if is_editing else ("✅ Edited" if is_edited else f"🔘 Edit ({config['name']})")
-        post_label = "🟢 Posted" if is_posted else f"⚪ Post ({config['name']})"
+        # Row 1: AI Rewrite Button
+        if is_rewriting:
+            ai_rewrite_label = "⚙️ AI Rewriting..."
+        elif has_ai_version:
+            ai_rewrite_label = "✅ AI Rewritten"
+        else:
+            ai_rewrite_label = f"✨ AI Rewrite ({config['name']})"
+        
+        # Row 2: Edit and Post Buttons
+        edit_label = "⚙️ Editing..." if get_from_store(f"is_editing_{safe_id}_{ch_id}", False) else ("✅ Edited" if is_edited else f"✍️ Edit ({config['name']})")
+        post_label = "🟢 Posted" if is_posted else f"➡️ Post ({config['name']})"
 
-        all_buttons.append([
-            InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"),
-            InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}")
-        ])
+        row = []
+        if not has_ai_version and not is_rewriting:
+            row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ai_rewrite|{safe_id}|{ch_id}"))
+        elif is_rewriting:
+            row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Disable button during processing
+        
+        if has_ai_version or is_edited:
+            row.append(InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"))
+            row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
+        elif not is_posted: # If no AI version or edit, allow posting original
+            row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
+
+        if row:
+            all_buttons.append(row)
 
     all_buttons.append([InlineKeyboardButton("🔴 Discharge", callback_data=f"discharge|{safe_id}")])
     return all_buttons
@@ -633,7 +657,8 @@ async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
         "source": item["source"]
     })
 
-    preview_text = rebuild_preview_text(safe_id) + "\n⌛ AI Processing..."
+    # Initial preview text only shows source news
+    preview_text = rebuild_preview_text(safe_id)
     buttons = get_post_buttons(safe_id)
 
     media_msg_id = None
@@ -663,22 +688,7 @@ async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
     update_store(f"review_msg_{safe_id}", review_msg.message_id)
     update_store(f"msg_to_safe_{review_msg.message_id}", safe_id)
 
-    versions = {}
-    for ch_id, config in CHANNEL_CONFIGS.items():
-        versions[str(ch_id)] = ai_rewrite_text(clean_summary, config["prompt"], config["api_key"])
-
-    update_store(f"versions_{safe_id}", versions)
-
-    try:
-        await bot.edit_message_text(
-            chat_id=ADMIN_ID,
-            message_id=review_msg.message_id,
-            text=rebuild_preview_text(safe_id),
-            reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.warning(f"Failed to update review message: {e}")
+    # No AI processing here, it will be done on-demand
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -687,17 +697,55 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("|")
     action, safe_id = parts[0], parts[1]
 
-    if action == "post":
+    if action == "ignore": # Placeholder for disabled buttons
+        return
+
+    if action == "ai_rewrite":
         ch_id = int(parts[2])
+        update_store(f"is_rewriting_{safe_id}_{ch_id}", True)
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
+        
+        raw_data = get_from_store(f"raw_{safe_id}")
+        original_text = raw_data.get("text", "")
+        config = CHANNEL_CONFIGS[ch_id]
+        
+        # Perform AI rewrite
+        rewritten_text = ai_rewrite_text(original_text, config["prompt"], config["api_key"])
+        
         versions = get_from_store(f"versions_{safe_id}", {})
-        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") or versions.get(str(ch_id))
+        versions[str(ch_id)] = rewritten_text
+        update_store(f"versions_{safe_id}", versions)
+        update_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        
+        # Update the review message with the new AI-rewritten text
+        review_msg_id = get_from_store(f"review_msg_{safe_id}")
+        if review_msg_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=ADMIN_ID,
+                    message_id=review_msg_id,
+                    text=rebuild_preview_text(safe_id),
+                    reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update review message after AI rewrite: {e}")
+
+    elif action == "post":
+        ch_id = int(parts[2])
+        
+        raw = get_from_store(f"raw_{safe_id}") or {}
+        original_text = raw.get("text", "")
+        img_url = raw.get("image_url")
+
+        # Determine which text to post: edited, AI rewritten, or original
+        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") or get_channel_version_text(safe_id, ch_id) or original_text
+        
         if not post_text:
             return
 
-        raw = get_from_store(f"raw_{safe_id}") or {}
-
         try:
-            img = download_media_as_bytes(raw.get("image_url"))
+            img = download_media_as_bytes(img_url)
             if img:
                 await context.bot.send_photo(
                     chat_id=ch_id,
@@ -805,7 +853,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CallbackQueryHandler(button_callback, pattern=r"^(post|edit|discharge)\|"))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern=r"^(post|edit|discharge|ai_rewrite|ignore)\|"))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_admin_reply))
 
     app.job_queue.run_repeating(check_news, interval=300, first=5)
