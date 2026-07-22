@@ -31,7 +31,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "-1004435011216"))
 
 GROQ_API_KEY_THET_HTAR = os.getenv("GROQ_API_KEY_THET_HTAR")
 GROQ_API_KEY_PHOE_MAUNG = os.getenv("GROQ_API_KEY_PHOE_MAUNG")
-GROQ_API_KEY_PYT = os.getenv("GROQ_API_KEY_PYT") # New API Key for ပြည်သူ့ရင်ဖွင့်သံ
+GROQ_API_KEY_PYT = os.getenv("GROQ_API_KEY_PYT") # API Key for ပြည်သူ့ရင်ဖွင့်သံ
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -63,7 +63,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_THET_HTAR,
         "prompt": (
             "You are 'Thet Htar', a trendy female Burmese influencer. "
-            "YOUR TASK: COMPLETELY REWRITE the news text provided. Summarize the content to ensure the final output is within 1000 characters. DO NOT copy the original text.\n\n"
+            "YOUR TASK: COMPLETELY REWRITE the news text provided. DO NOT copy the original text.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Friendly, conversational, and energetic.\n"
@@ -80,7 +80,7 @@ CHANNEL_CONFIGS = {
         "api_key": GROQ_API_KEY_PHOE_MAUNG,
         "prompt": (
             "You are 'Phoe Maung', a professional Burmese news editor. "
-            "YOUR TASK: PARAPHRASE and REWRITE the news into a professional report. Summarize the content to ensure the final output is within 1000 characters. DO NOT copy-paste.\n\n"
+            "YOUR TASK: PARAPHRASE and REWRITE the news into a professional report. DO NOT copy-paste.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Formal, objective, and authoritative.\n"
@@ -91,13 +91,13 @@ CHANNEL_CONFIGS = {
             "- NO links, NO source signatures, NO promotional text."
         )
     },
-    -1004313131336: { # New Channel: ပြည်သူ့ရင်ဖွင့်သံ
+    -1004313131336: { # New Channel from first file: ပြည်သူ့ရင်ဖွင့်သံ
         "name": "ပြည်သူ့ရင်ဖွင့်သံ",
         "signature": "<b>ပြည်သူ့ရင်ဖွင့်သံ</b>",
         "api_key": GROQ_API_KEY_PYT,
         "prompt": (
             "You are 'ပြည်သူ့ရင်ဖွင့်သံ', a neutral and objective Burmese news reporter. "
-            "YOUR TASK: REWRITE the news content into a factual and unbiased report. Summarize the content to ensure the final output is within 1000 characters. "
+            "YOUR TASK: REWRITE the news content into a factual and unbiased report. "
             "DO NOT copy the original text. Focus on presenting information clearly and neutrally.\n\n"
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
@@ -383,7 +383,7 @@ def ai_rewrite_text(original_text, prompt_style, api_key):
     try:
         client = Groq(api_key=api_key)
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile", # Using model from second file
             messages=[
                 {"role": "system", "content": prompt_style},
                 {"role": "user", "content": f"Please rewrite this news content completely in Burmese:\n\n{original_text}"}
@@ -408,7 +408,7 @@ def get_channel_version_text(safe_id, ch_id):
     if edited:
         return edited
     versions = get_from_store(f"versions_{safe_id}", {})
-    return versions.get(str(ch_id), None) # Return None if not processed by AI yet
+    return versions.get(str(ch_id), "⌛ AI Processing...")
 
 def rebuild_preview_text(safe_id):
     raw_data = get_from_store(f"raw_{safe_id}")
@@ -418,7 +418,6 @@ def rebuild_preview_text(safe_id):
     source_info = raw_data.get("source", "Unknown")
     original_text = raw_data.get("text", "")
     img_url = raw_data.get("image_url")
-    original_title = raw_data.get("title", "")
 
     full_text = f"<b>မူရင်းသတင်း:</b>\n<b>Source:</b> {html.escape(source_info)}\n"
 
@@ -426,58 +425,28 @@ def rebuild_preview_text(safe_id):
         preview_link = get_tg_proxy_url(img_url) or img_url
         full_text += f"🖼 <b>Image:</b> <a href='{html.escape(preview_link)}'>[ View Photo ]</a>\n"
 
-    # Show full original text regardless of length as requested
-    if original_title:
-        full_text += f"\n<b>{html.escape(original_title)}</b>\n"
-    
-    full_text += f"\n{html.escape(original_text)}\n\n"
+    full_text += f"\n{html.escape(original_text[:1000])}\n\n"
 
-    # Conditionally add AI rewritten versions and edited versions
     for ch_id, config in CHANNEL_CONFIGS.items():
-        current_text = get_channel_version_text(safe_id, ch_id)
-        is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
-        is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
-
-        if is_edited:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (Admin Edited):</b>\n{current_text}\n\n"
-        elif is_rewriting:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])}:</b>\n⌛ AI Processing...\n\n"
-        elif current_text:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (AI Rewritten):</b>\n{current_text}\n\n"
+        v_text = get_channel_version_text(safe_id, ch_id)
+        full_text += f"====================\n\n📌 <b>{html.escape(config['name'])}:</b>\n{v_text}\n\n"
 
     return full_text
 
 def get_post_buttons(safe_id):
     all_buttons = []
     for ch_id, config in CHANNEL_CONFIGS.items():
-        is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        is_editing = get_from_store(f"is_editing_{safe_id}_{ch_id}", False)
         is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
         is_posted = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
-        has_ai_version = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) is not None
 
-        # Row 1: Admin Edit, AI Rewrite, Post
-        buttons_row = []
+        edit_label = "⚙️ Editing..." if is_editing else ("✅ Edited" if is_edited else f"🔘 Edit ({config['name']})")
+        post_label = "🟢 Posted" if is_posted else f"⚪ Post ({config['name']})"
 
-        # Admin Edit Button
-        edit_label = "⚙️ Editing..." if get_from_store(f"is_editing_{safe_id}_{ch_id}", False) else ("✅ Edited" if is_edited else f"✍️ Edit ({config['name']})")
-        buttons_row.append(InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"))
-
-        # AI Rewrite Button
-        if is_rewriting:
-            ai_rewrite_label = "⚙️ AI Rewriting..."
-            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Disable during processing
-        elif has_ai_version:
-            ai_rewrite_label = "✅ AI Rewritten"
-            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Already rewritten, disable
-        else:
-            ai_rewrite_label = f"✨ AI Rewrite ({config['name']})"
-            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ai_rewrite|{safe_id}|{ch_id}"))
-
-        # Post Button
-        post_label = "🟢 Posted" if is_posted else f"➡️ Post ({config['name']})"
-        buttons_row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
-
-        all_buttons.append(buttons_row)
+        all_buttons.append([
+            InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"),
+            InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}")
+        ])
 
     all_buttons.append([InlineKeyboardButton("🔴 Discharge", callback_data=f"discharge|{safe_id}")])
     return all_buttons
@@ -486,12 +455,11 @@ def get_post_buttons(safe_id):
 async def fetch_telegram_news(channel_username):
     extracted_items = []
     headers = {"User-Agent": "Mozilla/5.0"}
-    
-    seen_in_batch = set()
 
     for mirror in RSSHUB_MIRRORS:
         url = f"{mirror}/telegram/channel/{channel_username}"
         try:
+            logger.info(f"Fetching Telegram RSSHub feed: {url}")
             res = requests.get(url, headers=headers, timeout=15)
             if res.status_code != 200:
                 logger.warning(f"Mirror failed {url} with status {res.status_code}")
@@ -504,49 +472,36 @@ async def fetch_telegram_news(channel_username):
                 items = soup.find_all("item")
 
             for item in items[:5]:
-                guid_tag = item.find("guid") or item.find("link")
-                if not guid_tag or not guid_tag.text:
+                guid = item.find("guid") or item.find("link")
+                if not guid or not guid.text:
                     continue
-                
-                raw_guid = guid_tag.text.strip()
-                normalized_guid = raw_guid.split('?')[0].rstrip('/')
-                
-                # Extract title and summary for content-based hash
+
+                unique_id = f"tg_{channel_username}_{hashlib.md5(guid.text.encode()).hexdigest()[:12]}"
+                if is_post_processed(unique_id):
+                    continue
+
                 title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
-                desc_html = ""
-                desc_tag = item.find("description")
-                if desc_tag and desc_tag.text:
-                    desc_html = desc_tag.text
+                desc_html = item.find("description").text if item.find("description") and item.find("description").text else ""
+                
                 try:
                     d_soup = BeautifulSoup(desc_html, "html.parser")
                     summary_text = d_soup.get_text(separator="\n").strip()
                 except Exception:
                     summary_text = desc_html.strip()
+                
                 summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-                # Create a robust unique ID using normalized GUID and content hash
-                # Combining title and summary text to ensure even if GUID changes slightly, same content is detected
-                content_to_hash = (title + summary_text).strip()
-                content_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
-                unique_id = f"tg_{channel_username}_{content_hash[:16]}"
-                
-                if is_post_processed(unique_id) or unique_id in seen_in_batch:
-                    continue
-                
-                seen_in_batch.add(unique_id)
 
                 img_src = extract_image_url_from_item(item, desc_html)
 
                 extracted_items.append({
                     "id": unique_id,
                     "source": f"Telegram @{channel_username}",
-                    "title": title,
                     "summary": summary_text,
                     "image_url": img_src,
-                    "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
+                    "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else ""
                 })
 
-                logger.info(f"Fetched Telegram item | source=@{channel_username} | id={unique_id} | has_image={bool(img_src)}")
+                logger.info(f"Fetched Telegram item | source=@{channel_username} | has_image={bool(img_src)}")
 
             if extracted_items:
                 return extracted_items
@@ -580,15 +535,14 @@ async def fetch_rss_news(rss_url):
             items = soup.find_all("item")
 
         extracted_items = []
-        seen_in_batch = set()
-        
         for item in items[:5]:
-            guid_tag = item.find("guid") or item.find("link")
-            if not guid_tag or not guid_tag.text:
+            guid = item.find("guid") or item.find("link")
+            if not guid or not guid.text:
                 continue
-            
-            raw_guid = guid_tag.text.strip()
-            normalized_guid = raw_guid.split('?')[0].rstrip('/')
+
+            unique_id = f"rss_{hashlib.md5(guid.text.encode()).hexdigest()[:12]}"
+            if is_post_processed(unique_id):
+                continue
 
             title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
             desc = item.find("description").text if item.find("description") and item.find("description").text else ""
@@ -599,31 +553,20 @@ async def fetch_rss_news(rss_url):
             except Exception:
                 body_text = desc.strip()
 
-            summary_text = f"<b>{title}</b>\n\n{body_text}".strip()
-            summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-            # Create a robust unique ID using normalized GUID and content hash
-            content_to_hash = (title + summary_text).strip()
-            content_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
-            unique_id = f"rss_{content_hash[:16]}"
-            
-            if is_post_processed(unique_id) or unique_id in seen_in_batch:
-                continue
-            
-            seen_in_batch.add(unique_id)
+            text = f"<b>{title}</b>\n\n{body_text}".strip()
+            text = re.sub(r"The post.*?appeared first on.*", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
             img_src = extract_image_url_from_item(item, desc)
 
             extracted_items.append({
                 "id": unique_id,
                 "source": source_name,
-                "title": title,
-                "summary": summary_text,
+                "summary": text,
                 "image_url": img_src,
-                "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
+                "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else ""
             })
 
-            logger.info(f"Fetched RSS item | source={source_name} | id={unique_id} | has_image={bool(img_src)}")
+            logger.info(f"Fetched RSS item | source={source_name} | has_image={bool(img_src)}")
 
         return extracted_items
 
@@ -648,7 +591,6 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
 async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
     bot = context.bot
 
-    # Final check before processing to avoid race conditions
     if is_post_processed(item["id"]):
         return
 
@@ -659,19 +601,16 @@ async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
 
     safe_id = make_safe_key(item["id"])
 
-    # Mark as processed immediately to prevent duplication if next run starts before this one finishes
-    add_processed_post(item["id"])
-
     update_store(f"raw_{safe_id}", {
         "text": clean_summary,
         "link": item["link"],
         "image_url": item.get("image_url"),
-        "source": item["source"],
-        "title": item.get("title", "")
+        "source": item["source"]
     })
 
-    # Initial preview text only shows source news (title/summary and image)
-    preview_text = rebuild_preview_text(safe_id)
+    add_processed_post(item["id"])
+
+    preview_text = rebuild_preview_text(safe_id) + "\n⌛ AI Processing..."
     buttons = get_post_buttons(safe_id)
 
     media_msg_id = None
@@ -701,7 +640,22 @@ async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
     update_store(f"review_msg_{safe_id}", review_msg.message_id)
     update_store(f"msg_to_safe_{review_msg.message_id}", safe_id)
 
-    # No AI processing here, it will be done on-demand
+    versions = {}
+    for ch_id, config in CHANNEL_CONFIGS.items():
+        versions[str(ch_id)] = ai_rewrite_text(clean_summary, config["prompt"], config["api_key"])
+
+    update_store(f"versions_{safe_id}", versions)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=ADMIN_ID,
+            message_id=review_msg.message_id,
+            text=rebuild_preview_text(safe_id),
+            reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update review message: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -710,59 +664,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("|")
     action, safe_id = parts[0], parts[1]
 
-    if action == "ignore": # Placeholder for disabled buttons
-        return
-
-    if action == "ai_rewrite":
+    if action == "post":
         ch_id = int(parts[2])
-        update_store(f"is_rewriting_{safe_id}_{ch_id}", True)
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
-        
-        raw_data = get_from_store(f"raw_{safe_id}")
-        original_text = raw_data.get("text", "")
-        config = CHANNEL_CONFIGS[ch_id]
-        
-        # Perform AI rewrite
-        rewritten_text = ai_rewrite_text(original_text, config["prompt"], config["api_key"])
-        
         versions = get_from_store(f"versions_{safe_id}", {})
-        versions[str(ch_id)] = rewritten_text
-        update_store(f"versions_{safe_id}", versions)
-        update_store(f"is_rewriting_{safe_id}_{ch_id}", False)
-        
-        # Update the review message with the new AI-rewritten text
-        review_msg_id = get_from_store(f"review_msg_{safe_id}")
-        if review_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=ADMIN_ID,
-                    message_id=review_msg_id,
-                    text=rebuild_preview_text(safe_id),
-                    reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update review message after AI rewrite: {e}")
-
-    elif action == "post":
-        ch_id = int(parts[2])
-        
-        raw = get_from_store(f"raw_{safe_id}") or {}
-        original_text = raw.get("text", "")
-        img_url = raw.get("image_url")
-
-        # Determine which text to post based on priority: Admin Edited > AI Rewritten > Original
-        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") # Highest priority: Admin Edited
-        if not post_text:
-            post_text = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) # Second priority: AI Rewritten
-        if not post_text:
-            post_text = original_text # Lowest priority: Original
-        
+        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") or versions.get(str(ch_id))
         if not post_text:
             return
 
+        raw = get_from_store(f"raw_{safe_id}") or {}
+
         try:
-            img = download_media_as_bytes(img_url)
+            img = download_media_as_bytes(raw.get("image_url"))
             if img:
                 await context.bot.send_photo(
                     chat_id=ch_id,
@@ -780,14 +692,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_store(f"is_posted_{safe_id}_{ch_id}", True)
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
         except Exception as e:
-            logger.error(f"Failed to post to channel {ch_id}: {e}")
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"🚨 **ERROR posting to {CHANNEL_CONFIGS[ch_id]['name']} (ID: {ch_id})**\n\n" \
-                     f"Error details: `{e}`\n\n" \
-                     f"Please check if the bot is an administrator in the channel and has the necessary permissions.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            logger.warning(f"Failed to post to channel {ch_id}: {e}")
 
     elif action == "edit":
         ch_id = int(parts[2])
@@ -798,15 +703,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_store(f"is_editing_{safe_id}_{ch_id}", True)
         review_msg_id = get_from_store(f"review_msg_{safe_id}")
 
-        # Get the current text being displayed for this channel to pre-fill for admin edit
-        current_text_for_edit = get_channel_version_text(safe_id, ch_id) or get_from_store(f"raw_{safe_id}").get("text", "")
-
         instruction_msg = await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=(
                 f"✍️ <b>{CHANNEL_CONFIGS[ch_id]['name']}</b> အတွက် စာသားပြင်ဆင်ပါ။\n"
-                f"ဒီ message ကို <b>Reply</b> ပြန်ပြီး edited text ပို့ပေးပါ။\n\n"
-                f"<b>လက်ရှိစာသား:</b>\n{html.escape(current_text_for_edit[:500])}..."
+                f"ဒီ message ကို <b>Reply</b> ပြန်ပြီး edited text ပို့ပေးပါ။"
             ),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=review_msg_id
@@ -864,33 +765,23 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
             parse_mode=ParseMode.HTML
         )
-        
-        # Optional: Delete the admin's reply message and the instruction message to keep chat clean
-        await context.bot.delete_message(ADMIN_ID, msg.message_id)
-        if edit_ctx:
-            await context.bot.delete_message(ADMIN_ID, reply_to_id)
-            delete_store(f"edit_context_{reply_to_id}")
-
+        await msg.reply_text(f"✅ {CHANNEL_CONFIGS[ch_id]['name']} အတွက် ပြင်ဆင်ပြီးပါပြီ။")
     except Exception as e:
-        logger.warning(f"Failed to update review message after admin edit: {e}")
+        logger.warning(f"Failed updating edited preview: {e}")
 
+    delete_store(f"edit_context_{reply_to_id}")
+
+# -------------------- MAIN --------------------
 def main():
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN is missing!")
-        return
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CallbackQueryHandler(button_callback, pattern=r"^(post|edit|discharge)\|"))
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_admin_reply))
 
-    # Handlers
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.REPLY & filters.User(user_id=ADMIN_ID), handle_admin_reply))
+    app.job_queue.run_repeating(check_news, interval=300, first=5)
 
-    # Periodic news check
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_news, interval=300, first=10) # Check every 5 minutes
-
-    logger.info("Bot started...")
-    application.run_polling()
+    logger.info("Bot is starting...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
