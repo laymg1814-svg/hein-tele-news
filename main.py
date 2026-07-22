@@ -203,19 +203,42 @@ def rebuild_preview_text(safe_id):
         edited = get_from_store(f"edited_{safe_id}_{ch_id}")
         ai_ver = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id))
         is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        is_editing = get_from_store(f"is_editing_{safe_id}_{ch_id}", False)
         
-        status = "✍️ Edited" if edited else ("⌛ Writing..." if is_rewriting else ("🤖 AI" if ai_ver else "🌑 Original"))
+        if is_editing:
+            status = "✍️ Editing..."
+        elif edited:
+            status = "✅ Edited"
+        elif is_rewriting:
+            status = "⌛ Writing..."
+        elif ai_ver:
+            status = "🤖 AI"
+        else:
+            status = "🌑 Original"
+            
         display_text = edited or ai_ver or "မူရင်းအတိုင်း"
-        text += f"====================\n📌 <b>{config['name']}</b> ({status}):\n{html.escape(display_text[:500])}\n\n"
+        # We don't escape display_text if it's edited or ai_ver because they might have HTML tags
+        # But for "မူရင်းအတိုင်း", we should escape the original text if we were to show it.
+        if not edited and not ai_ver:
+            display_text = html.escape(raw['text'][:500])
+        else:
+            # If it's AI or Edited, it might have tags. We limit length for preview.
+            display_text = display_text[:500]
+            
+        text += f"====================\n📌 <b>{config['name']}</b> ({status}):\n{display_text}\n\n"
     return text
 
 def get_post_buttons(safe_id):
     buttons = []
     for ch_id, config in CHANNEL_CONFIGS.items():
         is_posted = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
+        is_editing = get_from_store(f"is_editing_{safe_id}_{ch_id}", False)
+        edited = get_from_store(f"edited_{safe_id}_{ch_id}")
+        
+        edit_label = f"✍️ Editing ({config['name']})" if is_editing else (f"✅ Edited ({config['name']})" if edited else f"✍️ Edit ({config['name']})")
         
         row = [
-            InlineKeyboardButton(f"✍️ Edit ({config['name']})", callback_data=f"edit|{safe_id}|{ch_id}"),
+            InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"),
             InlineKeyboardButton(f"✨ AI Rewrite ({config['name']})", callback_data=f"ai|{safe_id}|{ch_id}"),
             InlineKeyboardButton("🟢 Posted" if is_posted else f"➡️ Post ({config['name']})", callback_data=f"post|{safe_id}|{ch_id}")
         ]
@@ -251,9 +274,12 @@ async def send_review(context, guid, ch_name, item):
     if img_url:
         img = download_media_as_bytes(img_url)
         if img:
-            media_msg = await context.bot.send_photo(chat_id=ADMIN_ID, photo=img)
-            update_store(f"media_msg_{safe_id}", media_msg.message_id)
-
+            try:
+                media_msg = await context.bot.send_photo(chat_id=ADMIN_ID, photo=img)
+                update_store(f"media_msg_{safe_id}", media_msg.message_id)
+            except Exception as e:
+                logger.error(f"Error sending photo: {e}")
+    
     review_msg = await context.bot.send_message(
         chat_id=ADMIN_ID, text=rebuild_preview_text(safe_id),
         reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)), parse_mode=ParseMode.HTML
@@ -269,6 +295,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "ai":
         ch_id = int(parts[2])
         update_store(f"is_rewriting_{safe_id}_{ch_id}", True)
+        # Update UI to show "Writing..."
         await query.edit_message_text(text=rebuild_preview_text(safe_id), reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)), parse_mode=ParseMode.HTML)
         
         raw = get_from_store(f"raw_{safe_id}")
@@ -278,6 +305,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         versions[str(ch_id)] = rewritten
         update_store(f"versions_{safe_id}", versions)
         update_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        # Final update
         await query.edit_message_text(text=rebuild_preview_text(safe_id), reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)), parse_mode=ParseMode.HTML)
 
     elif action == "post":
@@ -285,20 +313,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = get_from_store(f"raw_{safe_id}")
         edited = get_from_store(f"edited_{safe_id}_{ch_id}")
         ai_ver = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id))
-        post_text = edited or ai_ver or raw["text"]
+        
+        # Priority: Edited > AI > Original (escaped)
+        post_text = edited or ai_ver or html.escape(raw["text"])
         
         try:
             img = download_media_as_bytes(raw.get("image_url"))
             if img: await context.bot.send_photo(chat_id=ch_id, photo=img, caption=post_text, parse_mode=ParseMode.HTML)
             else: await context.bot.send_message(chat_id=ch_id, text=post_text, parse_mode=ParseMode.HTML)
+            
             update_store(f"is_posted_{safe_id}_{ch_id}", True)
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
-        except Exception as e: logger.error(f"Post Error: {e}")
+        except Exception as e: 
+            logger.error(f"Post Error: {e}")
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"❌ Post Error: {e}")
 
     elif action == "edit":
         ch_id = int(parts[2])
-        update_store(f"edit_context_{ADMIN_ID}", {"safe_id": safe_id, "ch_id": ch_id})
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"✍️ <b>{CHANNEL_CONFIGS[ch_id]['name']}</b> အတွက် စာသားပို့ပေးပါ။", parse_mode=ParseMode.HTML)
+        user_id = update.effective_user.id
+        # Set context for the specific user
+        update_store(f"edit_context_{user_id}", {"safe_id": safe_id, "ch_id": ch_id})
+        # Set status to editing
+        update_store(f"is_editing_{safe_id}_{ch_id}", True)
+        # Update the preview message immediately to show "Editing..."
+        await query.edit_message_text(text=rebuild_preview_text(safe_id), reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)), parse_mode=ParseMode.HTML)
+        # Ask user for input
+        await context.bot.send_message(chat_id=user_id, text=f"✍️ <b>{CHANNEL_CONFIGS[ch_id]['name']}</b> အတွက် စာသားပို့ပေးပါ။", parse_mode=ParseMode.HTML)
 
     elif action == "delete":
         m_id, r_id = get_from_store(f"media_msg_{safe_id}"), get_from_store(f"review_msg_{safe_id}")
@@ -310,17 +350,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ctx = get_from_store(f"edit_context_{ADMIN_ID}")
+    user_id = update.effective_user.id
+    ctx = get_from_store(f"edit_context_{user_id}")
     if not ctx: return
-    update_store(f"edited_{ctx['safe_id']}_{ctx['ch_id']}", update.message.text)
-    delete_store(f"edit_context_{ADMIN_ID}")
-    review_msg_id = get_from_store(f"review_msg_{ctx['safe_id']}")
-    await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=review_msg_id, text=rebuild_preview_text(ctx['safe_id']), reply_markup=InlineKeyboardMarkup(get_post_buttons(ctx['safe_id'])), parse_mode=ParseMode.HTML)
+    
+    safe_id = ctx['safe_id']
+    ch_id = ctx['ch_id']
+    
+    # Save the text with HTML formatting
+    update_store(f"edited_{safe_id}_{ch_id}", update.message.text_html or update.message.text)
+    # Clear states
+    delete_store(f"edit_context_{user_id}")
+    update_store(f"is_editing_{safe_id}_{ch_id}", False)
+    
+    # Update the original review message
+    review_msg_id = get_from_store(f"review_msg_{safe_id}")
+    if review_msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_ID, 
+                message_id=review_msg_id, 
+                text=rebuild_preview_text(safe_id), 
+                reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)), 
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Update Preview Error: {e}")
+            
     await update.message.reply_text("✅ ပြင်ဆင်ပြီးပါပြီ။")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CallbackQueryHandler(button_callback))
+    # Handle text messages from anyone, context check will filter it
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_reply))
     app.job_queue.run_repeating(check_news, interval=300, first=5)
     app.run_polling()
