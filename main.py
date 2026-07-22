@@ -2,11 +2,12 @@ import os
 import re
 import html
 import logging
-import requests
+import httpx
 import io
 import warnings
 import hashlib
 import json
+import asyncio
 from urllib.parse import unquote, urlparse, parse_qs
 
 from dotenv import load_dotenv
@@ -31,19 +32,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "-1004435011216"))
 
 GROQ_API_KEY_THET_HTAR = os.getenv("GROQ_API_KEY_THET_HTAR")
 GROQ_API_KEY_PHOE_MAUNG = os.getenv("GROQ_API_KEY_PHOE_MAUNG")
-GROQ_API_KEY_PYT = os.getenv("GROQ_API_KEY_PYT") # New API Key for ပြည်သူ့ရင်ဖွင့်သံ
+GROQ_API_KEY_PYT = os.getenv("GROQ_API_KEY_PYT")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
-
-if not GROQ_API_KEY_THET_HTAR:
-    raise ValueError("GROQ_API_KEY_THET_HTAR is missing")
-
-if not GROQ_API_KEY_PHOE_MAUNG:
-    raise ValueError("GROQ_API_KEY_PHOE_MAUNG is missing")
-
-if not GROQ_API_KEY_PYT:
-    raise ValueError("GROQ_API_KEY_PYT is missing")
 
 # -------------------- WARNING FILTER --------------------
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -84,14 +76,16 @@ CHANNEL_CONFIGS = {
             "STYLE REQUIREMENTS:\n"
             "- Language: Burmese (မြန်မာဘာသာ).\n"
             "- Tone: Formal, objective, and authoritative.\n"
-            "- Headline: Bold the headline using <b> tags.\n"
-            "- Bullet Points: Use ✅, 🔰, ☑️, 💚 bullet points for the key facts. Use one type of bullet point for one post. THIS IS MANDATORY.\n"
-            "- Structure: Clear, concise, and logical flow.\n"
+            "- Headline: The first line MUST be the headline, bolded using <b> tags, and optionally include a relevant emoji at the beginning (e.g., 💵 <b>ဗဟိုဘဏ်က စားသုံးဆီတင်သွင်းသူများသို အမေရိကန်ဒေါ်လာ ၄ သန်းကျော် ရောင်းချပေး</b>).\n"
+            "- Introduction: Write a short introductory paragraph summarizing the main event.\n"
+            "- Bullet Points: Extract 2 to 4 key facts and list them using the 🔹 bullet point. Each bullet point must start with 🔹.\n"
+            "- Hashtags: Add 3 to 5 relevant English hashtags at the end (e.g., #Myanmar #EconomyNews).\n"
+            "- Signature: The very last line MUST be your name 'ဖိုးမောင်' without any formatting.\n"
             "- Content: Ensure 100% accuracy for names, numbers, and dates.\n"
-            "- NO links, NO source signatures, NO promotional text."
+            "- NO links, NO original source signatures, NO promotional text."
         )
     },
-    -1004313131336: { # New Channel: ပြည်သူ့ရင်ဖွင့်သံ
+    -1004313131336: {
         "name": "ပြည်သူ့ရင်ဖွင့်သံ",
         "signature": "<b>ပြည်သူ့ရင်ဖွင့်သံ</b>",
         "api_key": GROQ_API_KEY_PYT,
@@ -111,33 +105,16 @@ CHANNEL_CONFIGS = {
     }
 }
 
-CHANNELS = [
-    "Thazinoo969",
-    "popularjournal",
-    "kothetjournalist9000",
-    "hminewai",
-    "snowqueen023"
-]
-
-RSS_URLS = [
-    "https://popularmyanmar.com/feed",
-    "https://www.bbc.com/burmese/index.xml",
-    "https://www.rfa.org/burmese/rss2.xml"
-]
-
-RSSHUB_MIRRORS = [
-    "https://rsshub.rssforever.com",
-    "https://rsshub.app",
-    "https://rsshub.moeyy.cn"
-]
+CHANNELS = ["Thazinoo969", "popularjournal", "kothetjournalist9000", "hminewai", "snowqueen023"]
+RSS_URLS = ["https://popularmyanmar.com/feed", "https://www.bbc.com/burmese/index.xml", "https://www.rfa.org/burmese/rss2.xml"]
+RSSHUB_MIRRORS = ["https://rsshub.rssforever.com", "https://rsshub.app", "https://rsshub.moeyy.cn"]
 
 DB_FILE = "processed_posts.txt"
 VERSIONS_FILE = "ai_versions.json"
 
 # -------------------- DATABASE --------------------
 def load_processed_posts():
-    if not os.path.exists(DB_FILE):
-        return set()
+    if not os.path.exists(DB_FILE): return set()
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return set(line.strip() for line in f if line.strip())
@@ -186,212 +163,103 @@ def update_store(key, value):
     save_ai_versions(AI_DATA_STORE)
 
 def get_from_store(key, default=None):
-    global AI_DATA_STORE
     return AI_DATA_STORE.get(key, default)
 
 def delete_store(key):
-    global AI_DATA_STORE
     if key in AI_DATA_STORE:
         del AI_DATA_STORE[key]
         save_ai_versions(AI_DATA_STORE)
 
-# -------------------- PARSER HELPERS --------------------
+# -------------------- ASYNC HELPERS --------------------
+async def async_http_get(url, headers=None, timeout=20):
+    if headers is None:
+        headers = {"User-Agent": "Mozilla/5.0"}
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            resp = await client.get(url, headers=headers, timeout=timeout)
+            return resp
+        except Exception as e:
+            logger.warning(f"Async HTTP GET failed for {url}: {e}")
+            return None
+
 def make_soup(content):
     try:
         return BeautifulSoup(content, "xml")
-    except Exception as e:
-        logger.warning(f"XML parser unavailable, fallback to html.parser: {e}")
+    except Exception:
         return BeautifulSoup(content, "html.parser")
 
 # -------------------- URL / IMAGE HELPERS --------------------
 def normalize_url(url):
-    if not url:
-        return None
-
+    if not url: return None
     url = html.unescape(url.strip())
-
     try:
         parsed = urlparse(url)
         qs = parse_qs(parsed.query)
-        if "url" in qs and qs["url"]:
-            url = qs["url"][0]
-    except Exception:
-        pass
-
+        if "url" in qs and qs["url"]: url = qs["url"][0]
+    except Exception: pass
     if "url=" in url:
-        try:
-            url = url.split("url=", 1)[-1]
-        except Exception:
-            pass
-
-    url = unquote(url)
-    return url.strip()
-
-def get_tg_proxy_url(url):
-    if not url:
-        return None
-    clean_url = normalize_url(url)
-    if not clean_url:
-        return None
-    clean_url = clean_url.replace("https://", "").replace("http://", "")
-    return f"https://i0.wp.com/{clean_url}"
-
-def extract_image_from_srcset(srcset):
-    if not srcset:
-        return None
-    try:
-        parts = [p.strip() for p in srcset.split(",") if p.strip()]
-        if not parts:
-            return None
-        return parts[-1].split(" ")[0].strip()
-    except Exception:
-        return None
-
-def find_image_in_html_soup(soup):
-    if not soup:
-        return None
-
-    for img in soup.find_all("img"):
-        candidate = (
-            img.get("src")
-            or img.get("data-src")
-            or img.get("data-original")
-            or extract_image_from_srcset(img.get("srcset"))
-        )
-        if candidate:
-            return normalize_url(candidate)
-
-    meta = soup.find("meta", attrs={"property": "og:image"}) or soup.find("meta", attrs={"name": "og:image"})
-    if meta and meta.get("content"):
-        return normalize_url(meta.get("content"))
-
-    return None
+        try: url = url.split("url=", 1)[-1]
+        except Exception: pass
+    return unquote(url).strip()
 
 def extract_image_url_from_item(item, desc_html=""):
     img_src = None
-
     if desc_html:
         try:
             d_soup = BeautifulSoup(desc_html, "html.parser")
-            img_src = find_image_in_html_soup(d_soup)
-            if img_src:
-                return normalize_url(img_src)
-        except Exception:
-            pass
-
+            for img in d_soup.find_all("img"):
+                candidate = img.get("src") or img.get("data-src") or img.get("data-original")
+                if candidate: return normalize_url(candidate)
+        except Exception: pass
     try:
         media = item.find("media:content") or item.find("media:thumbnail") or item.find("enclosure")
         if media:
             img_src = media.get("url") or media.get("href")
-            if img_src:
-                return normalize_url(img_src)
-    except Exception:
-        pass
-
-    try:
-        content_encoded = item.find("content:encoded")
-        if content_encoded and content_encoded.text:
-            c_soup = BeautifulSoup(content_encoded.text, "html.parser")
-            img_src = find_image_in_html_soup(c_soup)
-            if img_src:
-                return normalize_url(img_src)
-    except Exception:
-        pass
-
-    try:
-        img = item.find("img")
-        if img:
-            img_src = (
-                img.get("src")
-                or img.get("data-src")
-                or img.get("data-original")
-                or extract_image_from_srcset(img.get("srcset"))
-            )
-            if img_src:
-                return normalize_url(img_src)
-    except Exception:
-        pass
-
+            if img_src: return normalize_url(img_src)
+    except Exception: pass
     return None
 
-def is_valid_image_response(res):
-    if not res or res.status_code != 200:
-        return False
-
-    content_type = res.headers.get("Content-Type", "").lower()
-    if "image" in content_type:
-        return True
-
-    if len(res.content or b"") > 1500:
-        return True
-
-    return False
-
-def download_media_as_bytes(url):
-    if not url:
-        return None
-
+async def download_media_async(url):
+    if not url: return None
     url = normalize_url(url)
-    if not url:
-        return None
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": url
-    }
-
+    if not url: return None
+    
     clean = url.replace("https://", "").replace("http://", "")
-
     candidates = [
         url,
-        get_tg_proxy_url(url),
-        f"https://wsrv.nl/?url={clean}&w=1280&output=jpg",
-        f"https://images.weserv.nl/?url={clean}&w=1280",
+        f"https://i0.wp.com/{clean}",
+        f"https://wsrv.nl/?url={clean}&w=1280&output=jpg"
     ]
-
-    seen = set()
-    unique_candidates = []
-    for c in candidates:
-        if c and c not in seen:
-            seen.add(c)
-            unique_candidates.append(c)
-
-    for candidate_url in unique_candidates:
-        try:
-            logger.info(f"Trying image download: {candidate_url}")
-            res = requests.get(candidate_url, headers=headers, timeout=25, allow_redirects=True)
-            if is_valid_image_response(res):
-                media_io = io.BytesIO(res.content)
+    
+    for c_url in candidates:
+        resp = await async_http_get(c_url, timeout=25)
+        if resp and resp.status_code == 200:
+            content_type = resp.headers.get("Content-Type", "").lower()
+            if "image" in content_type or len(resp.content) > 1500:
+                media_io = io.BytesIO(resp.content)
                 media_io.name = "news_media.jpg"
-                media_io.seek(0)
-                logger.info(f"Image downloaded successfully from: {candidate_url}")
                 return media_io
-            else:
-                logger.warning(
-                    f"Invalid image response from {candidate_url} | "
-                    f"status={res.status_code}, content-type={res.headers.get('Content-Type')}"
-                )
-        except Exception as e:
-            logger.warning(f"Image download failed from {candidate_url}: {e}")
-            continue
-
-    logger.warning(f"All image download attempts failed for URL: {url}")
     return None
 
 # -------------------- AI --------------------
-def ai_rewrite_text(original_text, prompt_style, api_key):
+async def ai_rewrite_text_async(original_text, prompt_style, api_key):
     try:
-        client = Groq(api_key=api_key)
-        completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": prompt_style},
-                {"role": "user", "content": f"Please rewrite this news content completely in Burmese:\n\n{original_text}"}
-            ],
-            temperature=0.9,
-            max_tokens=2048,
-        )
-        rewritten = completion.choices[0].message.content
+        # Groq client is not natively async, but we can run it in a thread to avoid blocking the loop
+        def sync_call():
+            client = Groq(api_key=api_key)
+            completion = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": prompt_style},
+                    {"role": "user", "content": f"Please rewrite this news content completely in Burmese:\n\n{original_text}"}
+                ],
+                temperature=0.9,
+                max_tokens=2048,
+            )
+            return completion.choices[0].message.content
+
+        loop = asyncio.get_event_loop()
+        rewritten = await loop.run_in_executor(None, sync_call)
         if rewritten and len(rewritten.strip()) > 20:
             return rewritten.strip()
         return original_text
@@ -403,494 +271,266 @@ def ai_rewrite_text(original_text, prompt_style, api_key):
 def make_safe_key(post_id):
     return hashlib.md5(post_id.encode("utf-8")).hexdigest()[:15]
 
-def get_channel_version_text(safe_id, ch_id):
-    edited = get_from_store(f"edited_{safe_id}_{ch_id}")
-    if edited:
-        return edited
-    versions = get_from_store(f"versions_{safe_id}", {})
-    return versions.get(str(ch_id), None) # Return None if not processed by AI yet
-
 def rebuild_preview_text(safe_id):
     raw_data = get_from_store(f"raw_{safe_id}")
-    if not raw_data:
-        return None
-
-    source_info = raw_data.get("source", "Unknown")
-    original_text = raw_data.get("text", "")
-    img_url = raw_data.get("image_url")
-    original_title = raw_data.get("title", "")
-
-    full_text = f"<b>မူရင်းသတင်း:</b>\n<b>Source:</b> {html.escape(source_info)}\n"
-
-    if img_url:
-        preview_link = get_tg_proxy_url(img_url) or img_url
-        full_text += f"🖼 <b>Image:</b> <a href='{html.escape(preview_link)}'>[ View Photo ]</a>\n"
-
-    # Show full original text regardless of length as requested
-    if original_title:
-        full_text += f"\n<b>{html.escape(original_title)}</b>\n"
+    if not raw_data: return None
     
-    full_text += f"\n{html.escape(original_text)}\n\n"
+    full_text = f"<b>မူရင်းသတင်း:</b>\n<b>Source:</b> {html.escape(raw_data.get('source', 'Unknown'))}\n"
+    if raw_data.get("title"): full_text += f"<b>Title:</b> {html.escape(raw_data['title'])}\n"
+    full_text += f"\n{html.escape(raw_data.get('text', ''))}\n"
 
-    # Conditionally add AI rewritten versions and edited versions
+    versions = get_from_store(f"versions_{safe_id}", {})
     for ch_id, config in CHANNEL_CONFIGS.items():
-        current_text = get_channel_version_text(safe_id, ch_id)
-        is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
-        is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
+        v_text = versions.get(str(ch_id))
+        e_text = get_from_store(f"edited_{safe_id}_{ch_id}")
+        is_rw = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        is_ed = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
+        is_ps = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
 
-        if is_edited:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (Admin Edited):</b>\n{current_text}\n\n"
-        elif is_rewriting:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])}:</b>\n⌛ AI Processing...\n\n"
-        elif current_text:
-            full_text += f"====================\n\n📌 <b>{html.escape(config['name'])} (AI Rewritten):</b>\n{current_text}\n\n"
-
+        status = []
+        if is_rw: status.append("🔄 AI Rewriting...")
+        elif is_ed: status.append("✍️ Admin Edited")
+        elif v_text: status.append("✨ AI Rewritten")
+        if is_ps: status.append("✅ Posted")
+        
+        full_text += f"\n---\n<b>{config['name']}</b>{' (' + ', '.join(status) + ')' if status else ''}:\n"
+        full_text += f"{e_text or v_text or '<i>(Not yet processed by AI)</i>'}\n"
     return full_text
 
 def get_post_buttons(safe_id):
-    all_buttons = []
+    buttons = []
     for ch_id, config in CHANNEL_CONFIGS.items():
-        is_rewriting = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
-        is_edited = get_from_store(f"is_edited_{safe_id}_{ch_id}", False)
-        is_posted = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
-        has_ai_version = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) is not None
+        is_rw = get_from_store(f"is_rewriting_{safe_id}_{ch_id}", False)
+        is_ps = get_from_store(f"is_posted_{safe_id}_{ch_id}", False)
+        is_ed = get_from_store(f"is_editing_{safe_id}_{ch_id}", False)
 
-        # Row 1: Admin Edit, AI Rewrite, Post
-        buttons_row = []
+        row = []
+        # AI Rewrite
+        row.append(InlineKeyboardButton(
+            f"{'🔄' if is_rw else '✨'} {config['name']} AI",
+            callback_data=f"ai_rewrite|{safe_id}|{ch_id}" if not (is_ps or is_ed) else "ignore"
+        ))
+        # Edit
+        row.append(InlineKeyboardButton(
+            f"{'✍️' if is_ed else '✏️'} {config['name']} Edit",
+            callback_data=f"edit|{safe_id}|{ch_id}" if not (is_ps or is_rw) else "ignore"
+        ))
+        # Post
+        row.append(InlineKeyboardButton(
+            f"✅ {config['name']} Post",
+            callback_data=f"post|{safe_id}|{ch_id}" if not (is_ps or is_rw or is_ed) else "ignore"
+        ))
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("🗑️ Discharge", callback_data=f"discharge|{safe_id}")])
+    return buttons
 
-        # Admin Edit Button
-        edit_label = "⚙️ Editing..." if get_from_store(f"is_editing_{safe_id}_{ch_id}", False) else ("✅ Edited" if is_edited else f"✍️ Edit ({config['name']})")
-        buttons_row.append(InlineKeyboardButton(edit_label, callback_data=f"edit|{safe_id}|{ch_id}"))
-
-        # AI Rewrite Button
-        if is_rewriting:
-            ai_rewrite_label = "⚙️ AI Rewriting..."
-            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Disable during processing
-        elif has_ai_version:
-            ai_rewrite_label = "✅ AI Rewritten"
-            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ignore")) # Already rewritten, disable
-        else:
-            ai_rewrite_label = f"✨ AI Rewrite ({config['name']})"
-            buttons_row.append(InlineKeyboardButton(ai_rewrite_label, callback_data=f"ai_rewrite|{safe_id}|{ch_id}"))
-
-        # Post Button
-        post_label = "🟢 Posted" if is_posted else f"➡️ Post ({config['name']})"
-        buttons_row.append(InlineKeyboardButton(post_label, callback_data=f"post|{safe_id}|{ch_id}"))
-
-        all_buttons.append(buttons_row)
-
-    all_buttons.append([InlineKeyboardButton("🔴 Discharge", callback_data=f"discharge|{safe_id}")])
-    return all_buttons
-
-# -------------------- FETCHERS --------------------
+# -------------------- FETCHER --------------------
 async def fetch_telegram_news(channel_username):
-    extracted_items = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
-    seen_in_batch = set()
-
+    extracted = []
+    seen = set()
     for mirror in RSSHUB_MIRRORS:
         url = f"{mirror}/telegram/channel/{channel_username}"
-        try:
-            res = requests.get(url, headers=headers, timeout=15)
-            if res.status_code != 200:
-                logger.warning(f"Mirror failed {url} with status {res.status_code}")
-                continue
+        resp = await async_http_get(url)
+        if not resp or resp.status_code != 200: continue
+        
+        soup = make_soup(resp.content)
+        items = soup.find_all("item")
+        for item in items[:5]:
+            guid = (item.find("guid") or item.find("link")).text.strip().split('?')[0].rstrip('/')
+            title = item.find("title").text.strip() if item.find("title") else ""
+            desc_html = item.find("description").text if item.find("description") else ""
+            summary = BeautifulSoup(desc_html, "html.parser").get_text(separator="\n").strip()
+            summary = re.sub(r"The post.*?appeared first on.*", "", summary, flags=re.DOTALL | re.IGNORECASE).strip()
 
-            soup = make_soup(res.content)
-            items = soup.find_all("item")
-            if not items:
-                soup = BeautifulSoup(res.content, "html.parser")
-                items = soup.find_all("item")
-
-            for item in items[:5]:
-                guid_tag = item.find("guid") or item.find("link")
-                if not guid_tag or not guid_tag.text:
-                    continue
-                
-                raw_guid = guid_tag.text.strip()
-                normalized_guid = raw_guid.split('?')[0].rstrip('/')
-                
-                # Extract title and summary for content-based hash
-                title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
-                desc_html = ""
-                desc_tag = item.find("description")
-                if desc_tag and desc_tag.text:
-                    desc_html = desc_tag.text
-                try:
-                    d_soup = BeautifulSoup(desc_html, "html.parser")
-                    summary_text = d_soup.get_text(separator="\n").strip()
-                except Exception:
-                    summary_text = desc_html.strip()
-                summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-                # Create a robust unique ID using normalized GUID and content hash
-                # Combining title and summary text to ensure even if GUID changes slightly, same content is detected
-                content_to_hash = (title + summary_text).strip()
-                content_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
-                unique_id = f"tg_{channel_username}_{content_hash[:16]}"
-                
-                if is_post_processed(unique_id) or unique_id in seen_in_batch:
-                    continue
-                
-                seen_in_batch.add(unique_id)
-
-                img_src = extract_image_url_from_item(item, desc_html)
-
-                extracted_items.append({
-                    "id": unique_id,
-                    "source": f"Telegram @{channel_username}",
-                    "title": title,
-                    "summary": summary_text,
-                    "image_url": img_src,
-                    "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
-                })
-
-                logger.info(f"Fetched Telegram item | source=@{channel_username} | id={unique_id} | has_image={bool(img_src)}")
-
-            if extracted_items:
-                return extracted_items
-
-        except Exception as e:
-            logger.warning(f"Failed fetching from mirror {url}: {e}")
-            continue
-
-    return []
+            uid = f"tg_{hashlib.md5((guid + title + summary).encode()).hexdigest()[:16]}"
+            if is_post_processed(uid) or uid in seen: continue
+            seen.add(uid)
+            extracted.append({
+                "id": uid, "source": f"Telegram @{channel_username}", "title": title,
+                "summary": summary, "image_url": extract_image_url_from_item(item, desc_html),
+                "link": item.find("link").text.strip() if item.find("link") else guid
+            })
+        if extracted: break
+    return extracted
 
 async def fetch_rss_news(rss_url):
-    source_name = "RSS Feed"
-    if "bbc.com" in rss_url:
-        source_name = "BBC Burmese"
-    elif "rfa.org" in rss_url:
-        source_name = "RFA Burmese"
-    elif "popularmyanmar" in rss_url:
-        source_name = "Popular Journal"
+    name = "RSS"
+    if "bbc.com" in rss_url: name = "BBC"
+    elif "rfa.org" in rss_url: name = "RFA"
+    elif "popularmyanmar" in rss_url: name = "Popular"
 
-    try:
-        logger.info(f"Fetching RSS: {rss_url}")
-        response = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if response.status_code != 200:
-            logger.warning(f"RSS fetch failed {rss_url} with status {response.status_code}")
-            return []
+    resp = await async_http_get(rss_url)
+    if not resp or resp.status_code != 200: return []
+    
+    soup = make_soup(resp.content)
+    extracted = []
+    seen = set()
+    for item in soup.find_all("item")[:5]:
+        guid = (item.find("guid") or item.find("link")).text.strip().split('?')[0].rstrip('/')
+        title = item.find("title").text.strip() if item.find("title") else ""
+        desc = item.find("description").text if item.find("description") else ""
+        body = BeautifulSoup(desc, "html.parser").get_text(separator="\n").strip()
+        summary = f"<b>{title}</b>\n\n{body}".strip()
+        summary = re.sub(r"The post.*?appeared first on.*", "", summary, flags=re.DOTALL | re.IGNORECASE).strip()
 
-        soup = make_soup(response.content)
-        items = soup.find_all("item")
-        if not items:
-            soup = BeautifulSoup(response.content, "html.parser")
-            items = soup.find_all("item")
-
-        extracted_items = []
-        seen_in_batch = set()
-        
-        for item in items[:5]:
-            guid_tag = item.find("guid") or item.find("link")
-            if not guid_tag or not guid_tag.text:
-                continue
-            
-            raw_guid = guid_tag.text.strip()
-            normalized_guid = raw_guid.split('?')[0].rstrip('/')
-
-            title = item.find("title").text.strip() if item.find("title") and item.find("title").text else ""
-            desc = item.find("description").text if item.find("description") and item.find("description").text else ""
-
-            try:
-                d_soup = BeautifulSoup(desc, "html.parser")
-                body_text = d_soup.get_text(separator="\n").strip()
-            except Exception:
-                body_text = desc.strip()
-
-            summary_text = f"<b>{title}</b>\n\n{body_text}".strip()
-            summary_text = re.sub(r"The post.*?appeared first on.*", "", summary_text, flags=re.DOTALL | re.IGNORECASE).strip()
-
-            # Create a robust unique ID using normalized GUID and content hash
-            content_to_hash = (title + summary_text).strip()
-            content_hash = hashlib.md5(content_to_hash.encode('utf-8')).hexdigest()
-            unique_id = f"rss_{content_hash[:16]}"
-            
-            if is_post_processed(unique_id) or unique_id in seen_in_batch:
-                continue
-            
-            seen_in_batch.add(unique_id)
-
-            img_src = extract_image_url_from_item(item, desc)
-
-            extracted_items.append({
-                "id": unique_id,
-                "source": source_name,
-                "title": title,
-                "summary": summary_text,
-                "image_url": img_src,
-                "link": item.find("link").text.strip() if item.find("link") and item.find("link").text else normalized_guid
-            })
-
-            logger.info(f"Fetched RSS item | source={source_name} | id={unique_id} | has_image={bool(img_src)}")
-
-        return extracted_items
-
-    except Exception as e:
-        logger.warning(f"RSS fetch error from {rss_url}: {e}")
-        return []
+        uid = f"rss_{hashlib.md5((guid + title + summary).encode()).hexdigest()[:16]}"
+        if is_post_processed(uid) or uid in seen: continue
+        seen.add(uid)
+        extracted.append({
+            "id": uid, "source": name, "title": title, "summary": summary,
+            "image_url": extract_image_url_from_item(item, desc),
+            "link": item.find("link").text.strip() if item.find("link") else guid
+        })
+    return extracted
 
 # -------------------- BOT ACTIONS --------------------
 async def check_news(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Checking news...")
-
-    for channel in CHANNELS:
-        items = await fetch_telegram_news(channel)
+    tasks = [fetch_telegram_news(ch) for ch in CHANNELS] + [fetch_rss_news(url) for url in RSS_URLS]
+    results = await asyncio.gather(*tasks)
+    
+    for items in results:
         for item in items:
-            await send_review(context, item)
-
-    for rss_url in RSS_URLS:
-        items = await fetch_rss_news(rss_url)
-        for item in items:
-            await send_review(context, item)
+            if not is_post_processed(item["id"]):
+                add_processed_post(item["id"])
+                await send_review(context, item)
 
 async def send_review(context: ContextTypes.DEFAULT_TYPE, item):
-    bot = context.bot
-
-    # Final check before processing to avoid race conditions
-    if is_post_processed(item["id"]):
-        return
-
-    clean_summary = item["summary"]
-    if len(clean_summary) < 5:
-        add_processed_post(item["id"])
-        return
-
     safe_id = make_safe_key(item["id"])
-
-    # Mark as processed immediately to prevent duplication if next run starts before this one finishes
-    add_processed_post(item["id"])
-
     update_store(f"raw_{safe_id}", {
-        "text": clean_summary,
-        "link": item["link"],
-        "image_url": item.get("image_url"),
-        "source": item["source"],
+        "text": item["summary"], "link": item["link"],
+        "image_url": item.get("image_url"), "source": item["source"],
         "title": item.get("title", "")
     })
 
-    # Initial preview text only shows source news (title/summary and image)
-    preview_text = rebuild_preview_text(safe_id)
-    buttons = get_post_buttons(safe_id)
+    img_file = await download_media_async(item.get("image_url"))
+    if img_file:
+        try:
+            m_msg = await context.bot.send_photo(chat_id=ADMIN_ID, photo=img_file)
+            update_store(f"media_msg_{safe_id}", m_msg.message_id)
+            update_store(f"msg_to_safe_{m_msg.message_id}", safe_id)
+        except Exception: pass
 
-    media_msg_id = None
-    if item.get("image_url"):
-        img_file = download_media_as_bytes(item["image_url"])
-        if img_file:
-            try:
-                media_msg = await bot.send_photo(chat_id=ADMIN_ID, photo=img_file)
-                media_msg_id = media_msg.message_id
-                logger.info(f"Admin preview image sent for {item['id']}")
-            except Exception as e:
-                logger.warning(f"Failed to send admin preview image: {e}")
-        else:
-            logger.warning(f"No downloadable image for item {item['id']} | url={item.get('image_url')}")
-
-    review_msg = await bot.send_message(
-        chat_id=ADMIN_ID,
-        text=preview_text,
-        reply_markup=InlineKeyboardMarkup(buttons),
+    r_msg = await context.bot.send_message(
+        chat_id=ADMIN_ID, text=rebuild_preview_text(safe_id),
+        reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
         parse_mode=ParseMode.HTML
     )
-
-    if media_msg_id:
-        update_store(f"media_msg_{safe_id}", media_msg_id)
-        update_store(f"msg_to_safe_{media_msg_id}", safe_id)
-
-    update_store(f"review_msg_{safe_id}", review_msg.message_id)
-    update_store(f"msg_to_safe_{review_msg.message_id}", safe_id)
-
-    # No AI processing here, it will be done on-demand
+    update_store(f"review_msg_{safe_id}", r_msg.message_id)
+    update_store(f"msg_to_safe_{r_msg.message_id}", safe_id)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     parts = query.data.split("|")
+    if len(parts) < 2 or parts[0] == "ignore": return
     action, safe_id = parts[0], parts[1]
-
-    if action == "ignore": # Placeholder for disabled buttons
-        return
 
     if action == "ai_rewrite":
         ch_id = int(parts[2])
         update_store(f"is_rewriting_{safe_id}_{ch_id}", True)
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
         
-        raw_data = get_from_store(f"raw_{safe_id}")
-        original_text = raw_data.get("text", "")
+        raw = get_from_store(f"raw_{safe_id}", {})
         config = CHANNEL_CONFIGS[ch_id]
-        
-        # Perform AI rewrite
-        rewritten_text = ai_rewrite_text(original_text, config["prompt"], config["api_key"])
+        rewritten = await ai_rewrite_text_async(raw.get("text", ""), config["prompt"], config["api_key"])
         
         versions = get_from_store(f"versions_{safe_id}", {})
-        versions[str(ch_id)] = rewritten_text
+        versions[str(ch_id)] = rewritten
         update_store(f"versions_{safe_id}", versions)
         update_store(f"is_rewriting_{safe_id}_{ch_id}", False)
         
-        # Update the review message with the new AI-rewritten text
-        review_msg_id = get_from_store(f"review_msg_{safe_id}")
-        if review_msg_id:
+        r_msg_id = get_from_store(f"review_msg_{safe_id}")
+        if r_msg_id:
             try:
                 await context.bot.edit_message_text(
-                    chat_id=ADMIN_ID,
-                    message_id=review_msg_id,
+                    chat_id=ADMIN_ID, message_id=r_msg_id,
                     text=rebuild_preview_text(safe_id),
                     reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
                     parse_mode=ParseMode.HTML
                 )
-            except Exception as e:
-                logger.warning(f"Failed to update review message after AI rewrite: {e}")
+            except Exception: pass
 
     elif action == "post":
         ch_id = int(parts[2])
+        raw = get_from_store(f"raw_{safe_id}", {})
+        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") or \
+                    get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) or \
+                    raw.get("text", "")
         
-        raw = get_from_store(f"raw_{safe_id}") or {}
-        original_text = raw.get("text", "")
-        img_url = raw.get("image_url")
-
-        # Determine which text to post based on priority: Admin Edited > AI Rewritten > Original
-        post_text = get_from_store(f"edited_{safe_id}_{ch_id}") # Highest priority: Admin Edited
-        if not post_text:
-            post_text = get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) # Second priority: AI Rewritten
-        if not post_text:
-            post_text = original_text # Lowest priority: Original
-        
-        if not post_text:
-            return
-
         try:
-            img = download_media_as_bytes(img_url)
-            if img:
-                await context.bot.send_photo(
-                    chat_id=ch_id,
-                    photo=img,
-                    caption=post_text,
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=ch_id,
-                    text=post_text,
-                    parse_mode=ParseMode.HTML
-                )
-
+            img = await download_media_async(raw.get("image_url"))
+            if img: await context.bot.send_photo(chat_id=ch_id, photo=img, caption=post_text, parse_mode=ParseMode.HTML)
+            else: await context.bot.send_message(chat_id=ch_id, text=post_text, parse_mode=ParseMode.HTML)
             update_store(f"is_posted_{safe_id}_{ch_id}", True)
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
         except Exception as e:
-            logger.error(f"Failed to post to channel {ch_id}: {e}")
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"🚨 **ERROR posting to {CHANNEL_CONFIGS[ch_id]['name']} (ID: {ch_id})**\n\n" \
-                     f"Error details: `{e}`\n\n" \
-                     f"Please check if the bot is an administrator in the channel and has the necessary permissions.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 ERROR posting to {CHANNEL_CONFIGS[ch_id]['name']}: {e}")
 
     elif action == "edit":
         ch_id = int(parts[2])
-
-        for loop_ch in CHANNEL_CONFIGS:
-            update_store(f"is_editing_{safe_id}_{loop_ch}", False)
-
+        for c in CHANNEL_CONFIGS: update_store(f"is_editing_{safe_id}_{c}", False)
         update_store(f"is_editing_{safe_id}_{ch_id}", True)
-        review_msg_id = get_from_store(f"review_msg_{safe_id}")
+        
+        cur_text = get_from_store(f"edited_{safe_id}_{ch_id}") or \
+                   get_from_store(f"versions_{safe_id}", {}).get(str(ch_id)) or \
+                   get_from_store(f"raw_{safe_id}", {}).get("text", "")
 
-        # Get the current text being displayed for this channel to pre-fill for admin edit
-        current_text_for_edit = get_channel_version_text(safe_id, ch_id) or get_from_store(f"raw_{safe_id}").get("text", "")
-
-        instruction_msg = await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=(
-                f"✍️ <b>{CHANNEL_CONFIGS[ch_id]['name']}</b> အတွက် စာသားပြင်ဆင်ပါ။\n"
-                f"ဒီ message ကို <b>Reply</b> ပြန်ပြီး edited text ပို့ပေးပါ။\n\n"
-                f"<b>လက်ရှိစာသား:</b>\n{html.escape(current_text_for_edit[:500])}..."
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_to_message_id=review_msg_id
+        instr = await context.bot.send_message(
+            chat_id=ADMIN_ID, text=f"✍️ <b>{CHANNEL_CONFIGS[ch_id]['name']}</b> အတွက် စာသားပြင်ပါ။\nReply ပြန်ပေးပါ။\n\n{html.escape(cur_text[:200])}...",
+            parse_mode=ParseMode.HTML, reply_to_message_id=get_from_store(f"review_msg_{safe_id}")
         )
-
-        update_store(f"edit_context_{instruction_msg.message_id}", {"safe_id": safe_id, "ch_id": ch_id})
+        update_store(f"edit_context_{instr.message_id}", {"safe_id": safe_id, "ch_id": ch_id})
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)))
 
     elif action == "discharge":
         try:
-            m_id = get_from_store(f"media_msg_{safe_id}")
-            r_id = get_from_store(f"review_msg_{safe_id}")
-
-            if m_id:
-                await context.bot.delete_message(ADMIN_ID, m_id)
-            if r_id:
-                await context.bot.delete_message(ADMIN_ID, r_id)
-        except Exception as e:
-            logger.warning(f"Failed to discharge messages for {safe_id}: {e}")
+            m_id, r_id = get_from_store(f"media_msg_{safe_id}"), get_from_store(f"review_msg_{safe_id}")
+            if m_id: await context.bot.delete_message(ADMIN_ID, m_id)
+            if r_id: await context.bot.delete_message(ADMIN_ID, r_id)
+        except Exception: pass
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if not msg or not msg.reply_to_message:
-        return
-
-    reply_to_id = msg.reply_to_message.message_id
+    if not msg or not msg.reply_to_message: return
+    
+    reply_id = msg.reply_to_message.message_id
     new_text = msg.text or msg.caption
-    if not new_text:
-        return
+    if not new_text: return
 
-    edit_ctx = get_from_store(f"edit_context_{reply_to_id}")
-
-    if edit_ctx:
-        safe_id, ch_id = edit_ctx["safe_id"], edit_ctx["ch_id"]
+    ctx = get_from_store(f"edit_context_{reply_id}")
+    if ctx:
+        safe_id, ch_id = ctx["safe_id"], ctx["ch_id"]
+        try: await context.bot.delete_message(ADMIN_ID, reply_id)
+        except Exception: pass
+        delete_store(f"edit_context_{reply_id}")
     else:
-        safe_id = get_from_store(f"msg_to_safe_{reply_to_id}")
-        if not safe_id:
-            return
-
+        safe_id = get_from_store(f"msg_to_safe_{reply_id}")
         ch_id = next((c for c in CHANNEL_CONFIGS if get_from_store(f"is_editing_{safe_id}_{c}")), None)
-        if not ch_id:
-            return
+    
+    if not safe_id or not ch_id: return
 
     update_store(f"edited_{safe_id}_{ch_id}", new_text)
     update_store(f"is_editing_{safe_id}_{ch_id}", False)
     update_store(f"is_edited_{safe_id}_{ch_id}", True)
 
-    review_msg_id = get_from_store(f"review_msg_{safe_id}")
-
-    try:
-        await context.bot.edit_message_text(
-            chat_id=ADMIN_ID,
-            message_id=review_msg_id,
-            text=rebuild_preview_text(safe_id),
-            reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)),
-            parse_mode=ParseMode.HTML
-        )
-        
-        # Optional: Delete the admin's reply message and the instruction message to keep chat clean
-        await context.bot.delete_message(ADMIN_ID, msg.message_id)
-        if edit_ctx:
-            await context.bot.delete_message(ADMIN_ID, reply_to_id)
-            delete_store(f"edit_context_{reply_to_id}")
-
-    except Exception as e:
-        logger.warning(f"Failed to update review message after admin edit: {e}")
+    r_id = get_from_store(f"review_msg_{safe_id}")
+    if r_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_ID, message_id=r_id, text=rebuild_preview_text(safe_id),
+                reply_markup=InlineKeyboardMarkup(get_post_buttons(safe_id)), parse_mode=ParseMode.HTML
+            )
+            await context.bot.delete_message(ADMIN_ID, msg.message_id)
+        except Exception: pass
 
 def main():
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN is missing!")
-        return
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Handlers
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.REPLY & filters.User(user_id=ADMIN_ID), handle_admin_reply))
-
-    # Periodic news check
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_news, interval=300, first=10) # Check every 5 minutes
-
-    logger.info("Bot started...")
-    application.run_polling()
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.REPLY & filters.User(ADMIN_ID), handle_admin_reply))
+    app.job_queue.run_repeating(check_news, interval=300, first=10)
+    logger.info("Bot started (Async Optimized)...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
